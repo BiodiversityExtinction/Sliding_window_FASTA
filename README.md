@@ -10,7 +10,8 @@ This tool extracts predefined genomic intervals from multiple genome FASTA files
 
 - Extracts genomic windows using `samtools faidx`
 - Supports many samples via a simple sample table
-- Writes per-window FASTAs with informative headers: `>CODENAME|chr:start-end`
+- Writes per-window FASTAs with informative headers  
+  `>CODENAME|chr:start-end`
 - Automatically pads missing windows with `N`s of the correct length
 - Produces per-sample concatenated FASTA sequences
 - Deterministic window order (defined entirely by the regions file)
@@ -127,18 +128,26 @@ OUT/
 
 - One FASTA file per region per sample
 - Header format:
-  ```
-  >CODENAME|chr:start-end
-  ```
+
+```
+>CODENAME|chr:start-end
+```
+
+Each file contains exactly one sequence per sample.
+
+---
 
 ### Concatenated FASTA
 
 - One concatenated FASTA per sample
 - Header format:
-  ```
-  >CODENAME
-  ```
-- Sequences are concatenated in the exact order of the regions file
+
+```
+>CODENAME
+```
+
+- Sequences are concatenated in the **exact order of the regions file**
+- All concatenated sequences have identical total length across samples
 
 ---
 
@@ -153,6 +162,70 @@ end - start + 1
 This ensures consistent alignment lengths across samples and preserves positional correspondence between windows.
 
 All missing regions are recorded in the per-sample log file.
+
+---
+
+## Simplifying FASTA headers (optional)
+
+By default, per-window FASTA files use informative headers of the form:
+
+```
+>CODENAME|chr:start-end
+```
+
+This embeds window coordinates directly in the FASTA header, which is useful for traceability, debugging, and quality control.
+
+However, some phylogenetic tools and helper scripts expect **simple taxon names only**, for example:
+
+```
+>CODENAME
+```
+
+If required, headers can be simplified using standard command-line tools.
+
+---
+
+### Remove window information from FASTA headers
+
+To strip everything after the first `|` character and retain only the codename:
+
+```bash
+sed 's/|.*//' input.fasta > output.fasta
+```
+
+This converts:
+
+```
+>Polar|chr1:1000001-1020000
+```
+
+to:
+
+```
+>Polar
+```
+
+---
+
+### Apply to all FASTA files in a directory
+
+```bash
+for f in *.fasta; do
+  sed 's/|.*//' "$f" > "${f%.fasta}.simple.fasta"
+done
+```
+
+---
+
+### Important note
+
+If simplifying headers:
+
+- Ensure that **each FASTA file contains only one sequence per taxon**
+- Do **not** combine multiple windows into a single FASTA file after simplifying headers
+- Header simplification should be performed **after window extraction**, not before
+
+Failure to follow these rules may result in duplicated taxon names and invalid alignments.
 
 ---
 
