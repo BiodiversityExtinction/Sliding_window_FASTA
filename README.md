@@ -1,260 +1,352 @@
-# Sliding-window FASTA extraction and concatenation
+# PhyloSlide
 
-A lightweight shell pipeline for generating sliding-window FASTA sequences from whole-genome assemblies and preparing datasets for windowed phylogenetic and phylogenomic analyses.
-
-This tool extracts predefined genomic intervals from multiple genome FASTA files, standardises FASTA headers, handles missing data by padding with `N`s, and produces both per-window and concatenated sequences in a deterministic and reproducible way.
+PhyloSlide is a sliding-window phylogenomics pipeline for extracting genomic windows from multiple individuals and (optionally) inferring per-window phylogenetic trees in parallel across windows. It includes filters for missing data and low-information windows, optional aDNA-oriented masking (transversions-only), concordance factor analysis, and topology-based window selection for downstream dating analyses.
 
 ---
 
-## Features
+## What PhyloSlide Does
 
-- Extracts genomic windows using `samtools faidx`
-- Supports many samples via a simple sample table
-- Writes per-window FASTAs with informative headers  
-  `>CODENAME|chr:start-end`
-- Automatically pads missing windows with `N`s of the correct length
-- Produces per-sample concatenated FASTA sequences
-- Deterministic window order (defined entirely by the regions file)
-- Detailed logging (per sample and per run)
-- Minimal dependencies, no workflow framework required
+### Extraction Stage (always runs)
 
----
+- Reads a sample table (`CODENAME<TAB>genome.fasta`)
+- Uses a regions list in samtools faidx coordinate format (`chr:start-end`, 1-based inclusive)
+- For each sample and region:
+  - extracts the window using `samtools faidx`
+  - pads with Ns if the region is missing
+  - writes window FASTAs with header format: `>CODENAME|chr:start-end`
+- Writes a per-sample concatenated sequence across all regions:
+  - `OUT/<CODENAME>/<CODENAME>_concat.fasta`
 
-## Requirements
+### Optional Tree Pipeline (`--runtrees`)
 
-- `samtools`
-- `seqtk`
-- Bash (tested with `bash ≥ 4`)
+- Filters windows by missing data (`--maxN`)
+- Builds per-window multi-FASTA alignments
+- Optional conservative aDNA mode (`--transversions`)
+  - masks columns containing A/G or C/T variation to N
+  - ensures all downstream alignments are built consistently from masked data
+- Filters windows by minimum parsimony-informative sites (`--minpi`)
+- Runs one IQ-TREE job per window in parallel (`--jobs`)
+- Builds a reference tree:
+  - concatenated IQ-TREE (`--ref concat`)
+  - or ASTRAL species tree (`--ref astral`)
+- Computes gCF and sCF using IQ-TREE2
 
-Genome FASTA files will be indexed automatically if a `.fai` file is not present.
+### Optional Topology Filtering (`--topofilter`)
+
+Builds a dating supermatrix using only windows that:
+- passed missingness and minPI filters
+- match the reference topology (exact or compatible)
+- have minimum internal bootstrap ≥ `--minbs`
 
 ---
 
 ## Installation
 
-Clone the repository and make the script executable:
+### Recommended: Conda / Mamba Environment
+
+Create a file named `environment.yml`:
+
+```yaml
+name: phyloslide
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python>=3.10
+  - biopython>=1.80
+  - samtools
+  - seqtk
+  - bedtools
+  - iqtree
+  - openjdk
+  - astral-tree
+```
+
+Create and activate the environment:
 
 ```bash
-git clone https://github.com/yourusername/your-repo-name.git
-cd your-repo-name
-chmod +x make_windows_all.sh
+mamba env create -f environment.yml
+mamba activate phyloslide
 ```
 
-No further installation is required.
+If using conda instead of mamba:
 
----
-
-## Inputs
-
-### Sample table (`--input`)
-
-A **tab-separated** file with two columns:
-
-```text
-CODENAME<TAB>/path/to/genome.fasta
-```
-
-Example:
-
-```text
-#codename	genome
-Polar	/path/to/Polarbear.fa
-Brown	/path/to/BrownBear.fa
-Sun	/path/to/SunBear.fa
+```bash
+conda env create -f environment.yml
+conda activate phyloslide
 ```
 
 Notes:
-- Lines starting with `#` are ignored
-- Codenames must not contain whitespace
-- Each genome must be a valid FASTA file
+- `bedtools` is required only for `--makewindows`
+- `astral-tree` and `openjdk` are required only for `--ref astral`
+- `biopython` is required for `--ref astral` and `--topofilter`
 
 ---
 
-### Regions file (`--regions`)
+## Input Format
 
-A text file containing **one genomic interval per line**, in **samtools faidx format**:
+### Sample Table (`--input`)
 
-```text
+Tab-separated file:
+
+```
+American_black    /path/to/American_black.fa
+Asian_black       /path/to/Asian_black.fa
+Brown             /path/to/Brown.fa
+Polar             /path/to/Polar.fa
+```
+
+- No spaces in codenames
+- FASTA files must be indexed (`samtools faidx`) — PhyloSlide will create `.fai` if missing
+
+### Regions File (`--regions`)
+
+Each line must be:
+
+```
 chr:start-end
 ```
 
+Coordinates must be 1-based inclusive.
+
 Example:
 
-```text
-chr1:1000001-1020000
-chr1:2000001-2020000
-chr2:500001-520000
 ```
-
-Important:
-- Coordinates must be **1-based and inclusive**
-- **Explicit intervals are required** (contig-only entries such as `chr1` are not supported)
-- The order of regions in this file defines the concatenation order
+chr1:1-20000
+chr1:1000001-1020000
+```
 
 ---
 
-## Usage
+## Generating Windows Internally (`--makewindows`)
+
+Instead of manually creating a regions file, PhyloSlide can generate one using `bedtools makewindows`.
+
+Example: 20 kb windows sliding every 1 Mb:
 
 ```bash
-./make_windows_all.sh \
+python phyloslide.py \
+  --input samples.tsv \
+  --outdir OUT \
+  --makewindows \
+  --refgenome ref.fa \
+  --window 20000 \
+  --step 1000000
+```
+
+Restrict to long scaffolds:
+
+```bash
+python phyloslide.py \
+  --input samples.tsv \
+  --outdir OUT \
+  --makewindows \
+  --refgenome ref.fa \
+  --window 20000 \
+  --step 1000000 \
+  --min_scaffold_len 14000000
+```
+
+Restrict to specific chromosomes:
+
+```bash
+python phyloslide.py \
+  --input samples.tsv \
+  --outdir OUT \
+  --makewindows \
+  --refgenome ref.fa \
+  --window 20000 \
+  --step 1000000 \
+  --chroms chroms.txt
+```
+
+`chroms.txt` should contain one contig name per line.
+
+---
+
+## Running the Tree Pipeline
+
+Example full workflow:
+
+```bash
+python phyloslide.py \
+  --input samples.tsv \
+  --outdir OUT \
+  --makewindows --refgenome ref.fa --window 20000 --step 1000000 \
+  --runtrees \
+  --jobs 32 \
+  --iqtree_threads_per_job 1
+```
+
+Parallel recommendations:
+- Prefer `--iqtree_threads_per_job 1`
+- Set `--jobs` equal to available cores (or slightly below)
+- Reduce `--jobs` if running on slow network storage
+
+---
+
+## aDNA Conservative Mode (`--transversions`)
+
+```bash
+python phyloslide.py \
   --input samples.tsv \
   --regions regions.txt \
-  --outdir OUT
+  --outdir OUT \
+  --runtrees \
+  --transversions
 ```
 
-To view help:
-
-```bash
-./make_windows_all.sh --help
-```
+Behavior:
+- Masks entire columns that contain both A and G OR both C and T
+- All downstream alignments remain consistent with TV-only filtering
 
 ---
 
-## Outputs
+## Filters
 
-For each sample `CODENAME`, the following files are created:
+### Missing Data Filter (`--maxN`)
+- Default: 0.5
+- Drops window if ANY sample has fraction of N > maxN
 
-```text
+### Minimum Parsimony-Informative Sites (`--minpi`)
+- Default:
+  - 20 (full data)
+  - 10 (with `--transversions`)
+- Applied after TV masking (if enabled)
+
+---
+
+## Reference Trees
+
+### Concatenated (default)
+
+```
+--ref concat
+```
+
+Runs IQ-TREE on:
+- `All_concat.filtered.fasta`
+- or `All_concat.filtered.tv.fasta`
+
+### ASTRAL
+
+```
+--ref astral --astral /path/to/astral.jar
+```
+
+- Collapses branches with support < `--collapse`
+- Requires Java
+- Requires biopython
+
+---
+
+## Concordance Factors
+
+When `--runtrees` is enabled:
+- gCF and sCF are computed using IQ-TREE2
+- Outputs in `OUT/trees/concordance/`
+
+---
+
+## Topology Filtering
+
+```bash
+python phyloslide.py \
+  --input samples.tsv \
+  --regions regions.txt \
+  --outdir OUT \
+  --runtrees \
+  --topofilter \
+  --minbs 90 \
+  --topomode exact
+```
+
+Options:
+- `--minbs` default 90
+- `--topomode exact` (default)
+- `--topomode compatible`
+
+Outputs:
+- Filtered region list
+- Dating supermatrix alignment
+
+---
+
+## Output Structure
+
+```
 OUT/
-├── run.log
-├── CODENAME/
-│   ├── chr1:1000001-1020000.fasta
-│   ├── chr1:2000001-2020000.fasta
-│   ├── CODENAME_concat.fasta
-│   └── CODENAME.log
+  phyloslide.log
+  filtering/
+  Combined_windows/
+  Combined/
+  trees/
+  <CODENAME>/
 ```
 
-### Per-window FASTA files
-
-- One FASTA file per region per sample
-- Header format:
-
-```
->CODENAME|chr:start-end
-```
-
-Each file contains exactly one sequence per sample.
+Key files:
+- `regions.kept.final.txt`
+- `All_concat.filtered.fasta`
+- `all_window_trees.trs`
+- Reference tree
+- Concordance outputs
 
 ---
 
-### Concatenated FASTA
+## Troubleshooting
 
-- One concatenated FASTA per sample
-- Header format:
+If slow:
+- Reduce `--jobs`
+- Run on local scratch disk
 
-```
->CODENAME
-```
+If no windows left:
+- Increase `--maxN`
+- Decrease `--minpi`
+- Increase window size
+- Reduce `--minbs`
 
-- Sequences are concatenated in the **exact order of the regions file**
-- All concatenated sequences have identical total length across samples
+If IQ-TREE fails:
+- Check `trees/window_logs/`
+- Check `failed_windows.txt`
 
----
-
-## Missing data handling
-
-If a region is not present in a given genome assembly (e.g. missing scaffold or truncated contig), the script writes a sequence of `N`s with length:
-
-```
-end - start + 1
-```
-
-This ensures consistent alignment lengths across samples and preserves positional correspondence between windows.
-
-All missing regions are recorded in the per-sample log file.
+Windows filenames contain colons (`chr:start-end`).
+Use Linux/macOS; Windows may fail due to colon in filenames.
 
 ---
 
-## Simplifying FASTA headers (optional)
+## Recommended Student Workflow
 
-By default, per-window FASTA files use informative headers of the form:
-
-```
->CODENAME|chr:start-end
-```
-
-This embeds window coordinates directly in the FASTA header, which is useful for traceability, debugging, and quality control.
-
-However, some phylogenetic tools and helper scripts expect **simple taxon names only**, for example:
-
-```
->CODENAME
-```
-
-If required, headers can be simplified using standard command-line tools.
+1. Test on ~50 windows first.
+2. Confirm filtering behavior.
+3. Scale up gradually.
+4. Record:
+   - window parameters
+   - filtering parameters
+   - model and bootstrap settings
+   - reference method used
 
 ---
 
-### Remove window information from FASTA headers
+## Dependencies Summary
 
-To strip everything after the first `|` character and retain only the codename:
+Always required:
+- samtools
+- seqtk
 
-```bash
-sed 's/|.*//' input.fasta > output.fasta
-```
-
-This converts:
-
-```
->Polar|chr1:1000001-1020000
-```
-
-to:
-
-```
->Polar
-```
-
----
-
-### Apply to all FASTA files in a directory
-
-```bash
-for f in *.fasta; do
-  sed 's/|.*//' "$f" > "${f%.fasta}.simple.fasta"
-done
-```
-
----
-
-### Important note
-
-If simplifying headers:
-
-- Ensure that **each FASTA file contains only one sequence per taxon**
-- Do **not** combine multiple windows into a single FASTA file after simplifying headers
-- Header simplification should be performed **after window extraction**, not before
-
-Failure to follow these rules may result in duplicated taxon names and invalid alignments.
-
----
-
-## Logging
-
-- `OUT/run.log`  
-  Summary of the full run, including start/end times and per-sample status
-- `OUT/CODENAME/CODENAME.log`  
-  Detailed log for each sample, including missing windows and concatenation statistics
-
----
-
-## Typical applications
-
-- Sliding-window phylogenetic tree inference
-- Genome-wide concatenation analyses
-- Comparative genomics across many samples
-- Analyses involving ancient, historical, and modern DNA datasets
-
----
-
-## Notes
-
-- This tool assumes all regions are provided explicitly as `chr:start-end`
-- No automatic BED conversion is performed
-- Window generation (e.g. sliding windows) should be performed upstream
+If using:
+- `--makewindows` → bedtools
+- `--runtrees` → iqtree
+- `--ref astral` → java + astral-tree
+- `--topofilter` or `--ref astral` → biopython
 
 ---
 
 ## Citation
 
-If you use this workflow in a publication, please cite this repository and specify the commit hash used.
+Please cite:
+- samtools
+- bedtools
+- IQ-TREE2
+- ASTRAL
+
+PhyloSlide orchestrates these tools but does not replace them.
